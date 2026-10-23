@@ -8,6 +8,12 @@ import torch
 import torch.backends.cudnn as cudnn
 import json
 
+# timm==0.3.2 imports torch._six.container_abcs. That name is gone in the
+# torch 1.13.1 pin from requirements.txt (the module remains).
+import collections.abc
+if not hasattr(torch._six, "container_abcs"):
+    torch._six.container_abcs = collections.abc
+
 from pathlib import Path
 
 from timm.data import Mixup

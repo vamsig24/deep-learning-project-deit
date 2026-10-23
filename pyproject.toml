@@ -1,0 +1,38 @@
+[project]
+name = "deit"
+version = "0.1.0"
+description = "DeiT training on PSC ImageNet-1k"
+readme = "README_deit.md"
+requires-python = ">=3.10,<3.11"
+# This training code imports timm==0.3.2 (README_deit.md, requirements.txt).
+# timm 0.3.2 imports torch._six, which PyTorch removed in 2.0, and uses
+# numpy.bool, which NumPy removed in 1.24. The ViT checkout at
+# https://github.com/vamsig24/deep-learning-project pins torch==2.6.0,
+# torchvision==0.21.0, and timm>=1.0.11. Those pins do not import main.py.
+# torch==1.13.1 is the pin in requirements.txt. torchvision==0.14.1 is the
+# matching CUDA 11.7 wheel; requirements.txt still lists torchvision==0.8.1
+# from before that torch bump, and that wheel does not match torch 1.13.1.
+dependencies = [
+    "numpy>=1.21.2,<1.24",
+    # torchvision 0.14.1 allows Pillow>=5.3,!=8.3. Stay on the 9.x line
+    # that shipped with this torch pin.
+    "pillow>=9.1.0,<10",
+    "timm==0.3.2",
+    "torch==1.13.1",
+    "torchvision==0.14.1",
+]
+
+# Scripts are run from the checkout. The project is not an installable package.
+[tool.uv]
+package = false
+
+# Same explicit-index pattern as the ViT pyproject. cu124 does not publish
+# torch 1.13.1; cu117 is the CUDA build for this torch pin.
+[[tool.uv.index]]
+name = "pytorch-cu117"
+url = "https://download.pytorch.org/whl/cu117"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu117" }
+torchvision = { index = "pytorch-cu117" }
