@@ -16,6 +16,17 @@ from losses import DistillationLoss
 import utils
 
 
+def train_accuracy(outputs, targets):
+    """Top-1 accuracy (%); with mixup/cutmix soft targets, the target mass on the predicted class."""
+    if not isinstance(outputs, torch.Tensor):
+        # distilled models return (class head, distillation head); evaluation averages them
+        outputs = (outputs[0] + outputs[1]) / 2
+    pred = outputs.argmax(dim=1)
+    if targets.dim() == 1:
+        return (pred == targets).float().mean().item() * 100.0
+    return targets.gather(1, pred.unsqueeze(1)).mean().item() * 100.0
+
+
 def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
@@ -73,6 +84,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
 
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        if not args.cosub:
+            with torch.no_grad():
+                metric_logger.meters['acc1'].update(train_accuracy(outputs, targets), n=samples.shape[0])
+            if criterion.distillation_type != 'none':
+                metric_logger.update(base_loss=criterion.last_base_loss.item(),
+                                     distillation_loss=criterion.last_distillation_loss.item(),
+                                     teacher_agreement=criterion.last_teacher_agreement.item() * 100.0)
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)

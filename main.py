@@ -185,6 +185,14 @@ def get_args_parser():
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+
+    # Weights & Biases logging; the API key is read from WANDB_API_KEY
+    parser.add_argument('--wandb', action='store_true', default=False, help='Log metrics to Weights & Biases')
+    parser.add_argument('--wandb-project', default=None, type=str, help='W&B project (default: $WANDB_PROJECT)')
+    parser.add_argument('--wandb-entity', default=None, type=str, help='W&B user or team (default: $WANDB_ENTITY)')
+    parser.add_argument('--wandb-name', default=None, type=str, help='W&B run display name')
+    parser.add_argument('--wandb-id', default=None, type=str,
+                        help='W&B run id; reuse it when resuming to continue the same run')
     return parser
 
 
@@ -393,6 +401,7 @@ def main(args):
     )
 
     output_dir = Path(args.output_dir)
+    max_accuracy = 0.0
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -408,16 +417,32 @@ def main(args):
                 utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
             if 'scaler' in checkpoint:
                 loss_scaler.load_state_dict(checkpoint['scaler'])
+            # keep the best accuracy so a resumed run does not overwrite best_checkpoint.pth with a worse model
+            max_accuracy = checkpoint.get('max_accuracy', 0.0)
         lr_scheduler.step(args.start_epoch)
     if args.eval:
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         return
 
+    run = None
+    if args.wandb and utils.is_main_process():
+        import wandb
+        wandb.login()
+        run = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_name,
+            id=args.wandb_id,
+            resume='allow' if args.wandb_id else None,
+            dir=args.output_dir or None,
+            config=vars(args),
+        )
+
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
-    max_accuracy = 0.0
     for epoch in range(args.start_epoch, args.epochs):
+        epoch_start = time.time()
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
 
@@ -430,38 +455,36 @@ def main(args):
         )
 
         lr_scheduler.step(epoch)
-        if args.output_dir:
-            checkpoint_paths = [output_dir / 'checkpoint.pth']
-            for checkpoint_path in checkpoint_paths:
-                utils.save_on_master({
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'epoch': epoch,
-                    'model_ema': get_state_dict(model_ema),
-                    'scaler': loss_scaler.state_dict(),
-                    'args': args,
-                }, checkpoint_path)
-             
 
+        # evaluate before checkpointing so checkpoint.pth records the up-to-date max_accuracy
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
-        
-        if max_accuracy < test_stats["acc1"]:
+
+        is_best = max_accuracy < test_stats["acc1"]
+        if is_best:
             max_accuracy = test_stats["acc1"]
-            if args.output_dir:
-                checkpoint_paths = [output_dir / 'best_checkpoint.pth']
-                for checkpoint_path in checkpoint_paths:
-                    utils.save_on_master({
-                        'model': model_without_ddp.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'lr_scheduler': lr_scheduler.state_dict(),
-                        'epoch': epoch,
-                        'model_ema': get_state_dict(model_ema),
-                        'scaler': loss_scaler.state_dict(),
-                        'args': args,
-                    }, checkpoint_path)
-            
+
+        if args.output_dir:
+            checkpoint_state = {
+                'model': model_without_ddp.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'epoch': epoch,
+                'model_ema': get_state_dict(model_ema),
+                'scaler': loss_scaler.state_dict(),
+                'max_accuracy': max_accuracy,
+                'args': args,
+            }
+            checkpoint_paths = [output_dir / 'checkpoint.pth']
+            if is_best:
+                checkpoint_paths.append(output_dir / 'best_checkpoint.pth')
+            for checkpoint_path in checkpoint_paths:
+                utils.save_on_master(checkpoint_state, checkpoint_path)
+                print(f"Saved {checkpoint_path}")
+                if run is not None:
+                    # upload now, after the file is fully written; re-uploads replace the previous version
+                    run.save(str(checkpoint_path), base_path=str(output_dir), policy='now')
+
         print(f'Max accuracy: {max_accuracy:.2f}%')
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
@@ -476,9 +499,29 @@ def main(args):
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
+        if run is not None:
+            # same metric names as the hw2p2 notebook, plus top-5 and distillation terms
+            metrics = {
+                'epoch': epoch,
+                'lr': train_stats['lr'],
+                'train_loss': train_stats['loss'],
+                'train_cls_acc': train_stats.get('acc1'),
+                'train_base_loss': train_stats.get('base_loss'),
+                'train_distillation_loss': train_stats.get('distillation_loss'),
+                'train_teacher_agreement': train_stats.get('teacher_agreement'),
+                'valid_loss': test_stats['loss'],
+                'valid_cls_acc': test_stats['acc1'],
+                'valid_top5_acc': test_stats['acc5'],
+                'best_valid_cls_acc': max_accuracy,
+                'epoch_time_min': (time.time() - epoch_start) / 60,
+            }
+            run.log({k: v for k, v in metrics.items() if v is not None}, step=epoch)
+
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
+    if run is not None:
+        run.finish()
 
 
 if __name__ == '__main__':

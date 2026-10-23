@@ -1,0 +1,33 @@
+[project]
+name = "deit"
+version = "0.1.0"
+description = "DeiT training on ImageNet-1k (PSC Bridges-2)"
+readme = "README.md"
+# torch 1.13.1 publishes CUDA wheels for Python 3.7-3.10.
+requires-python = ">=3.10,<3.11"
+# Dependencies for main.py and the DeiT model/augmentation code.
+dependencies = [
+    # torch 1.13 is built against NumPy 1.x.
+    "numpy>=1.21,<2",
+    "pillow>=9.1.0",
+    # timm 0.3.2 (README) imports torch._six, which torch>=1.9 removed.
+    # 0.4.12 is the newest release that still has the APIs this code uses
+    # (e.g. timm.data.transforms._pil_interp) and includes regnety_160 for the teacher.
+    "timm==0.4.12",
+    "torch==1.13.1",
+    "torchvision==0.14.1",
+    "wandb==0.23.1",
+]
+
+# This repository runs scripts directly; it is not an installable Python package.
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cu117"
+url = "https://download.pytorch.org/whl/cu117"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu117" }
+torchvision = { index = "pytorch-cu117" }
